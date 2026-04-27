@@ -1,8 +1,22 @@
 import json
+import re
 from google.generativeai import GenerativeModel
 from models.schemas import GeneratedQuery, QueryPlacement, ParsedContent
 from prompts.templates import CONTENT_ANALYSIS_PROMPT, CONTENT_GENERATION_PROMPT
 from config import ANALYSIS_TEMPERATURE, MAX_OUTPUT_TOKENS, MAX_URL_CONTENT_LENGTH
+
+
+def _repair_truncated_json(raw: str) -> list[dict]:
+    """Attempt to salvage a truncated JSON array by keeping only complete objects."""
+    objects = []
+    for match in re.finditer(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\}', raw, re.DOTALL):
+        try:
+            obj = json.loads(match.group())
+            if "query_text" in obj:
+                objects.append(obj)
+        except json.JSONDecodeError:
+            continue
+    return objects
 
 
 def map_queries_to_content(
@@ -12,7 +26,7 @@ def map_queries_to_content(
 ) -> list[QueryPlacement]:
     sections_data = []
     for s in parsed_content.sections:
-        truncated_body = s.body_text[:500] if len(s.body_text) > 500 else s.body_text
+        truncated_body = s.body_text[:300] if len(s.body_text) > 300 else s.body_text
         sections_data.append({
             "section_index": s.section_index,
             "heading": s.heading,
@@ -57,7 +71,13 @@ def map_queries_to_content(
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
 
-    placements_data = json.loads(raw)
+    try:
+        placements_data = json.loads(raw)
+    except json.JSONDecodeError:
+        placements_data = _repair_truncated_json(raw)
+        if not placements_data:
+            raise ValueError("Gemini returned invalid JSON during analysis. Please try again with fewer queries selected.")
+
     results = []
     for p in placements_data:
         query = next(
